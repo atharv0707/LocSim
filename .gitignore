@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Xcode – personal settings and build output
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+
+# LocSimServer – private Python environment and caches
+LocSimServer/.venv/
+__pycache__/
+*.pyc
+
+# Old icon variants (not used by the app)
+IconArchive/
