@@ -17,6 +17,10 @@ struct LocSimClient {
         var name: String?
         var lat: Double?
         var lon: Double?
+        /// False when the Mac can't currently see the iPhone (e.g. you've left home).
+        var linked: Bool?
+        /// The place waiting to be set once the iPhone is reachable again.
+        var pending: String?
     }
 
     private var baseURL: URL? {
@@ -62,13 +66,16 @@ struct LocSimClient {
         }
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw ServerError(message: message(data))
+            throw ServerError(message: message(data),
+                              isWaiting: (response as? HTTPURLResponse)?.statusCode == 503)
         }
         return data
     }
 
     struct ServerError: LocalizedError {
         var message: String
+        /// 503: LocSimServer accepted the change but the iPhone is out of reach, so it's queued.
+        var isWaiting = false
         var errorDescription: String? { message }
     }
 }

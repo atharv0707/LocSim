@@ -14,3 +14,4 @@ __pycache__/
 
 # Old icon variants (not used by the app)
 IconArchive/
+LocSimServer/.locsim_state.json

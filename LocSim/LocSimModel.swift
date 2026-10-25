@@ -23,6 +23,8 @@ final class LocSimModel {
     var server: LocSimClient.ServerStatus?
     var serverError: String?
     var actionError: String?
+    /// True when `actionError` is a queued change (iPhone out of reach), not a failure.
+    var actionIsWaiting = false
     var isSending = false
     var selected: Place?
     let places = PlaceStore()
@@ -64,7 +66,8 @@ final class LocSimModel {
                          icon: "location.fill", color: .green)
         }
         if let name = server.name {
-            return .init(title: "Connecting to iPhone…", detail: "Setting \(name)",
+            return .init(title: "Real location – waiting for iPhone",
+                         detail: "Sets \(name) when it's back on the Mac's Wi-Fi",
                          icon: "arrow.triangle.2.circlepath", color: .orange)
         }
         if let last = places.last {
@@ -82,6 +85,7 @@ final class LocSimModel {
     func simulate(_ place: Place) async -> Bool {
         isSending = true
         actionError = nil
+        actionIsWaiting = false
         var ok = false
         do {
             _ = try await client.simulate(place)
@@ -89,6 +93,8 @@ final class LocSimModel {
             ok = true
         } catch {
             actionError = friendly(error)
+            actionIsWaiting = (error as? LocSimClient.ServerError)?.isWaiting == true
+            if actionIsWaiting { places.record(place) }
         }
         await refresh()
         isSending = false
@@ -99,10 +105,12 @@ final class LocSimModel {
     func stop() async {
         isSending = true
         actionError = nil
+        actionIsWaiting = false
         do {
             _ = try await client.stop()
         } catch {
             actionError = friendly(error)
+            actionIsWaiting = (error as? LocSimClient.ServerError)?.isWaiting == true
         }
         await refresh()
         isSending = false

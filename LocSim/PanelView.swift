@@ -210,7 +210,15 @@ struct PanelView: View {
         List {
             if let actionError = model.actionError {
                 Section {
-                    MessageLabel(text: actionError, kind: .error)
+                    MessageLabel(text: actionError, kind: model.actionIsWaiting ? .waiting : .error)
+                }
+            } else if model.isSimulating {
+                Section {
+                    Label("Simulation only works while the iPhone is on the Mac's Wi-Fi (or plugged in). "
+                          + "Away from it, the iPhone uses its real GPS until it's back.",
+                          systemImage: "info.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -451,14 +459,30 @@ struct PlaceIcon: View {
 
 /// Status / error message: SF Symbol + colour, no emoji.
 struct MessageLabel: View {
-    enum Kind { case success, error }
+    enum Kind { case success, error, waiting }
     var text: String
     var kind: Kind
 
     var body: some View {
-        Label(text, systemImage: kind == .success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+        Label(text, systemImage: icon)
             .font(.footnote)
-            .foregroundStyle(kind == .success ? Color.green : Color.red)
+            .foregroundStyle(color)
+    }
+
+    private var icon: String {
+        switch kind {
+        case .success: "checkmark.circle.fill"
+        case .error: "exclamationmark.triangle.fill"
+        case .waiting: "clock.fill"
+        }
+    }
+
+    private var color: Color {
+        switch kind {
+        case .success: .green
+        case .error: .red
+        case .waiting: .orange
+        }
     }
 }
 
@@ -494,7 +518,7 @@ struct SettingsSheet: View {
                 } header: {
                     Text("Mac running LocSimServer")
                 } footer: {
-                    Text("LocSimServer prints the addresses to use when it starts. On the same Wi-Fi, use the Mac's name ending in “.local”. On your iPhone's hotspot, use the 172.20.10.x address. Away from home, use the Mac's Tailscale 100.x.x.x address.")
+                    Text("LocSimServer prints the addresses to use when it starts. On the same Wi-Fi, use the Mac's name ending in “.local”. On your iPhone's hotspot, use the 172.20.10.x address. Away from home, use the Mac's Tailscale 100.x.x.x address to see the status – changing the location still needs the iPhone on the Mac's Wi-Fi or a cable.")
                 }
             }
             .navigationTitle("Settings")

@@ -4,7 +4,11 @@ LocSimServer – sets your iPhone's GPS from the LocSim app, using pymobiledevic
 
 The LocSim app (on the phone) sends the place you pick here; this server runs
 `pymobiledevice3 developer dvt simulate-location set` to apply it, and
-`... clear` when you tap Stop.
+`... clear` when you tap Off.
+
+The Mac can only reach the iPhone on the same Wi-Fi or by cable, and iOS drops the simulated
+location within seconds of losing that link. While the iPhone is away, the place you picked
+is kept and set again automatically when it's back.
 
 One-time setup (Terminal):
     python3 -m pip install -U pymobiledevice3
@@ -35,8 +39,11 @@ PORT = int(os.environ.get("PORT", "8765"))
 # On macOS, "--native" reaches the iPhone through Apple's own connection (the one Xcode uses),
 # which works over cable and Wi-Fi without root. Override with PMD_ARGS if needed.
 PMD_ARGS = os.environ.get("PMD_ARGS", "--native" if sys.platform == "darwin" else "").split()
-RETRY_SECONDS = 15  # how often to retry if the phone drops off while simulation is on
+RETRY_SECONDS = 15  # first retry after the iPhone drops off; doubles each time...
+MAX_RETRY_SECONDS = 120  # ...up to this, so an iPhone away from home doesn't keep the Mac busy
 CONFIRM_SECONDS = 20  # how long to wait for the iPhone to confirm a new location
+# Remembers the location the iPhone is showing, so a restart of this server still knows it.
+STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".locsim_state.json")
 
 
 def find_pymobiledevice3():
@@ -60,6 +67,8 @@ def _short_error(output):
     last = lines[-1]
     if "ERROR" in last:
         last = last.split("ERROR", 1)[1].strip()
+    if "Ctrl+C" in last:  # it had been holding the location and the link just dropped
+        return ""
     if "Device not found" in last or "no device" in last.lower():
         return "the Mac can't see the iPhone (connect it by cable or the same Wi-Fi as this Mac)"
     return last
@@ -70,15 +79,28 @@ def log(text):
 
 
 class Simulator:
-    """Owns the running `simulate-location set` process and the on/off state."""
+    """Owns the running `simulate-location set` process and the on/off state.
+
+    Two things are tracked separately:
+      target  – what you asked for in the app (a place, or None for Off)
+      applied – what the iPhone was last confirmed to be showing
+
+    iOS only keeps a simulated location while the Mac is linked to the iPhone: when the link
+    drops (e.g. you leave home) the iPhone goes back to its real GPS within seconds. So while
+    the iPhone is out of reach, the place you picked is kept as pending and set again
+    automatically once the iPhone is back on the Mac's Wi-Fi (or plugged in).
+    """
 
     def __init__(self):
         self.lock = threading.RLock()
         self.proc = None
         self.logfile = None
-        self.target = None          # (lat, lon, name) the user wants, or None when off
-        self.connected = False      # True while the location is actually applied
+        self.applied = _load_state()   # (lat, lon, name) the iPhone is showing, or None
+        self.target = self.applied     # (lat, lon, name) you want, or None when off
+        self.connected = False         # True while pymobiledevice3 is linked to the iPhone
         self.last_error = None
+        self.next_retry = time.time() + RETRY_SECONDS
+        self.retry_delay = RETRY_SECONDS
         threading.Thread(target=self._watch, daemon=True).start()
 
     # -- public ---------------------------------------------------------------
@@ -86,32 +108,72 @@ class Simulator:
     def set(self, lat, lon, name):
         with self.lock:
             self.target = (lat, lon, name)
+            self._reset_retry()
             return self._apply()
 
     def clear(self):
+        """Back to real GPS. Returns (ok, error); if the iPhone can't be reached it's retried later."""
         with self.lock:
             self.target = None
+            self._reset_retry()
+            was_linked = self.connected
             self._stop_process()
             self.connected = False
-            self.last_error = None
-            if PMD:
-                subprocess.run(PMD + ["developer", "dvt", "simulate-location", "clear", *PMD_ARGS],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                               timeout=30, check=False)
+            if not was_linked:  # the iPhone already went back to real GPS when the link dropped
+                self._set_applied(None)
+                self.last_error = None
+                return True, None
+            return self._clear_on_phone()
 
     def status(self):
-        with self.lock:
-            if self.target is None:
-                return {"active": False, "message": "Off – the iPhone is using its real GPS."}
-            lat, lon, name = self.target
-            if self.connected:
-                message = f"On – the iPhone is at {name}."
-            else:
-                message = (f"Trying to reach the iPhone to set {name}… "
-                           f"({self.last_error or 'not connected'})")
-            return {"active": self.connected, "message": message, "name": name, "lat": lat, "lon": lon}
+        # No lock: a retry in the background can take ~20 s and the app shouldn't hang on it.
+        target, applied, connected, error = self.target, self.applied, self.connected, self.last_error
+        away = "the iPhone isn't on the same Wi-Fi as the Mac (or plugged in)"
+        if target is None and applied is None:
+            return {"active": False, "linked": connected,
+                    "message": "Off – the iPhone is using its real GPS."}
+        if target is None:  # Off was tapped while a clear was still being confirmed
+            return {"active": False, "linked": connected,
+                    "message": "Off – the iPhone is using its real GPS."}
+        t_lat, t_lon, t_name = target
+        if connected and applied == target:
+            return {"active": True, "linked": True, "name": t_name, "lat": t_lat, "lon": t_lon,
+                    "message": f"On – the iPhone is at {t_name}."}
+        # Not linked: iOS has dropped the simulated location, so the iPhone is on real GPS.
+        return {"active": False, "linked": False, "pending": t_name, "name": t_name, "lat": t_lat, "lon": t_lon,
+                "message": (f"The iPhone is on its real GPS – {t_name} will be set automatically when it's "
+                            f"back on the Mac's Wi-Fi or plugged in ({error or away}).")}
 
     # -- internals ------------------------------------------------------------
+
+    def _set_applied(self, value):
+        self.applied = value
+        _save_state(value)
+
+    def _reset_retry(self):
+        self.retry_delay = RETRY_SECONDS
+        self.next_retry = time.time() + RETRY_SECONDS
+
+    def _clear_on_phone(self):
+        if self.applied is None:
+            self.last_error = None
+            return True, None
+        if PMD is None:
+            self.last_error = "pymobiledevice3 isn't installed on the Mac"
+            return False, self.last_error
+        try:
+            result = subprocess.run(PMD + ["developer", "dvt", "simulate-location", "clear", *PMD_ARGS],
+                                    capture_output=True, text=True, timeout=CONFIRM_SECONDS, check=False)
+            ok = result.returncode == 0
+            error = None if ok else (_short_error(result.stdout + result.stderr) or "pymobiledevice3 failed")
+        except subprocess.TimeoutExpired:
+            ok, error = False, "the iPhone didn't respond"
+        if ok:
+            self._set_applied(None)
+            self.last_error = None
+            return True, None
+        self.last_error = error
+        return False, error
 
     def _apply(self):
         """Starts pymobiledevice3 for self.target. Returns (ok, error)."""
@@ -130,25 +192,28 @@ class Simulator:
         deadline = time.time() + CONFIRM_SECONDS
         while time.time() < deadline:
             if "Ctrl+C" in self._peek_log():
-                self.connected, self.last_error = True, None
-                return True, None
+                return self._applied_ok()
             code = self.proc.poll()
             if code is not None:
                 output = self._read_log()
                 self.proc = None
                 if code == 0:  # older versions set the location and exit
-                    self.connected, self.last_error = True, None
-                    return True, None
+                    return self._applied_ok()
                 self.connected = False
                 self.last_error = _short_error(output) or f"pymobiledevice3 exited with code {code}"
-                return False, f"Couldn't reach the iPhone: {self.last_error}"
+                return False, self.last_error
             time.sleep(0.25)
         # No confirmation in time – don't pretend it worked.
         self._stop_process()
         self.connected = False
         self.last_error = "the iPhone didn't respond"
-        return False, ("Couldn't reach the iPhone: it didn't respond. Connect it to this Mac by cable "
-                       "or put both on the same Wi-Fi.")
+        return False, self.last_error
+
+    def _applied_ok(self):
+        self.connected, self.last_error = True, None
+        self._set_applied(self.target)
+        self._reset_retry()
+        return True, None
 
     def _peek_log(self):
         """Reads what pymobiledevice3 has printed so far without disturbing it."""
@@ -166,6 +231,7 @@ class Simulator:
         return text[-800:]
 
     def _stop_process(self):
+        # Stopping pymobiledevice3 doesn't clear the location on the iPhone – only `clear` does.
         if self.proc and self.proc.poll() is None:
             self.proc.send_signal(signal.SIGINT)  # like Ctrl+C, so it can tidy up
             try:
@@ -179,22 +245,59 @@ class Simulator:
             self.logfile = None
 
     def _watch(self):
-        """If the phone disconnects while simulation is on, keep retrying until it's back."""
+        """Notices when the iPhone drops off, and finishes pending changes once it's back.
+
+        Losing the iPhone doesn't turn simulation off: it keeps the last location. Retries back
+        off from 15 s to 2 min so a phone that's away from home doesn't keep the Mac busy.
+        """
         while True:
-            time.sleep(RETRY_SECONDS)
+            time.sleep(1)
             with self.lock:
-                if self.target is None:
-                    continue
                 if self.proc is not None and self.proc.poll() is not None:
-                    output = self._read_log()  # it was holding the location and has now died
+                    output = self._read_log()  # it was linked to the iPhone and has now stopped
                     self.proc = None
                     self.connected = False
                     self.last_error = _short_error(output) or "connection to the iPhone was lost"
-                    log(f"Lost the iPhone: {self.last_error}")
-                if not self.connected:
-                    ok, _ = self._apply()
+                    if self.target is not None:
+                        log(f"Lost the iPhone ({self.last_error}) – it's back on real GPS; "
+                            f"{self.target[2]} will be set again when it's back")
+                if time.time() < self.next_retry:
+                    continue
+                self.next_retry = time.time() + self.retry_delay
+                self.retry_delay = min(self.retry_delay * 2, MAX_RETRY_SECONDS)
+                if self.target is None and self.applied is not None:
+                    ok, _ = self._clear_on_phone()
                     if ok:
-                        log(f"Reconnected – location set to {self.target[2]} again")
+                        log("OFF  back to real GPS (iPhone is back)")
+                elif self.target is not None and not self.connected:
+                    was_pending = self.target != self.applied
+                    ok, _ = self._apply()
+                    if ok and was_pending:
+                        log(f"ON   {self.target[2]}  (iPhone is back)")
+                    elif ok:
+                        log(f"Reconnected to the iPhone – still at {self.target[2]}")
+
+
+def _load_state():
+    try:
+        with open(STATE_FILE) as f:
+            data = json.load(f)
+        return (float(data["lat"]), float(data["lon"]), str(data["name"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _save_state(applied):
+    try:
+        if applied is None:
+            if os.path.exists(STATE_FILE):
+                os.remove(STATE_FILE)
+        else:
+            lat, lon, name = applied
+            with open(STATE_FILE, "w") as f:
+                json.dump({"lat": lat, "lon": lon, "name": name}, f)
+    except OSError:
+        pass
 
 
 sim = Simulator()
@@ -207,7 +310,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the app gave up waiting; it will pick up the result from /status
 
     def do_GET(self):
         if self.path in ("/", "/status"):
@@ -233,13 +339,19 @@ class Handler(BaseHTTPRequestHandler):
             if ok:
                 log(f"ON   {name}  {lat:.6f}, {lon:.6f}")
                 return self._reply(200, {"message": f"On – the iPhone is at {name}."})
-            log(f"FAIL {name}: {error}")
-            return self._reply(500, {"message": error + " LocSimServer will keep retrying."})
+            log(f"WAIT {name}: {error}")
+            return self._reply(503, {"message": (
+                f"Can't reach the iPhone – {error}. {name} will be set automatically once the iPhone "
+                "is back on the Mac's Wi-Fi or plugged in.")})
 
         if self.path == "/clear":
-            sim.clear()
-            log("OFF  back to real GPS")
-            return self._reply(200, {"message": "Off – the iPhone is using its real GPS."})
+            ok, error = sim.clear()
+            if ok:
+                log("OFF  back to real GPS")
+                return self._reply(200, {"message": "Off – the iPhone is using its real GPS."})
+            log(f"WAIT off: {error}")
+            return self._reply(503, {"message": (
+                f"Couldn't confirm Off with the iPhone – {error}. LocSimServer will keep trying.")})
 
         self._reply(404, {"message": "Not found"})
 
@@ -283,7 +395,9 @@ def main():
         pass
     finally:
         log("Stopping – clearing the simulated location…")
-        sim.clear()
+        ok, error = sim.clear()
+        if not ok:
+            log(f"Couldn't confirm Off with the iPhone ({error}).")
         server.server_close()
 
 
