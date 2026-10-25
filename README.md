@@ -11,10 +11,11 @@ LocSim sets the GPS location of an iPhone from an app on the iPhone itself. You 
 - [Setup](#setup)
   - [1. Clone the repository](#1-clone-the-repository)
   - [2. Prepare the iPhone](#2-prepare-the-iphone)
-  - [3. Set up LocSimServer on the Mac](#3-set-up-locsimserver-on-the-mac)
+  - [3. Run the setup script on the Mac](#3-run-the-setup-script-on-the-mac)
   - [4. Build and install the iOS app](#4-build-and-install-the-ios-app)
   - [5. Connect the app to the server](#5-connect-the-app-to-the-server)
 - [Running LocSimServer as a background service](#running-locsimserver-as-a-background-service)
+- [Using it away from home (Personal Hotspot)](#using-it-away-from-home-personal-hotspot)
 - [Using the app](#using-the-app)
 - [Networking](#networking)
 - [Configuration](#configuration)
@@ -48,8 +49,8 @@ An iOS app cannot change the device's location on its own. The change has to be 
 - The iPhone's own reported location is shown on the map, so you can confirm the simulated location has been applied.
 - Favourites (with rename and delete) and a list of recent places.
 - Find My-style bottom sheet with three heights.
-- The server confirms each location with the phone before reporting success, and retries automatically if the phone disconnects.
-- Optional background service, so the server starts at login and restarts if it stops.
+- The server confirms each location with the phone before reporting success. If the phone drops off, the chosen place is kept and set again automatically (retried every 10 seconds) once the phone is back.
+- One-command setup (`setup.sh`) and an optional background service, so the server starts at login and restarts if it stops.
 
 ## Requirements
 
@@ -58,8 +59,8 @@ An iOS app cannot change the device's location on its own. The change has to be 
 | Mac | macOS with Xcode 26 or later installed |
 | iPhone | iOS 26.5 or later, with Developer Mode enabled |
 | Apple ID | A free Apple ID is sufficient for installing on your own device |
-| Python | Python 3 (for example from Homebrew: `brew install python`) |
-| pymobiledevice3 | Installed into the project's own Python environment (see setup) |
+| Python | Python 3.9 or later (for example from Homebrew: `brew install python`) |
+| pymobiledevice3 | Installed automatically into the project's own Python environment by `setup.sh` |
 | Tailscale (optional) | Lets the app reach the server from other networks |
 
 ## Repository layout
@@ -81,6 +82,7 @@ LocSim/
 ├── LocSimServer/
 │   ├── locsim_server.py          The server (Python standard library and pymobiledevice3)
 │   └── install_service.sh        Installs or removes the background service (launchd)
+├── setup.sh                      First-time setup: Python environment, pymobiledevice3, background service
 ├── .gitignore
 └── README.md
 ```
@@ -101,22 +103,32 @@ cd LocSim
 
 Developer Mode must remain enabled for location simulation to work.
 
-### 3. Set up LocSimServer on the Mac
+### 3. Run the setup script on the Mac
 
-Create a private Python environment for the server and install pymobiledevice3 into it. A dedicated environment avoids the `externally-managed-environment` error that Homebrew's Python reports for system-wide installs.
+From the repository folder, run:
 
 ```bash
-python3 -m venv LocSimServer/.venv
-LocSimServer/.venv/bin/python -m pip install -U pymobiledevice3
+./setup.sh
 ```
 
-Start the server:
+The script:
+
+1. Checks that Python 3.9 or later is installed.
+2. Creates a private Python environment in `LocSimServer/.venv` (this avoids Homebrew's `externally-managed-environment` error).
+3. Installs or updates pymobiledevice3 in that environment.
+4. Installs LocSimServer as a background service that starts at login and restarts if it stops (see [Running LocSimServer as a background service](#running-locsimserver-as-a-background-service)).
+5. Prints the address to enter in the app.
+
+It is safe to run again at any time, for example to update pymobiledevice3.
+
+To set up the environment without the background service, and run the server yourself in Terminal instead:
 
 ```bash
+./setup.sh --no-service
 LocSimServer/.venv/bin/python LocSimServer/locsim_server.py
 ```
 
-On start-up it prints the addresses the app can use, for example:
+On start-up the server prints the addresses the app can use, for example:
 
 ```
 LocSimServer running. In the LocSim app (Settings), use one of:
@@ -125,7 +137,7 @@ LocSimServer running. In the LocSim app (Settings), use one of:
      100.78.197.95:8765  (Tailscale)
 ```
 
-If macOS asks whether Python may accept incoming network connections or find devices on the local network, choose **Allow**. Leave the Terminal window open while testing. Press `Ctrl+C` to stop the server; this also returns the phone to its real location.
+If macOS asks whether Python may accept incoming network connections or find devices on the local network, choose **Allow**.
 
 To confirm that the Mac can reach the phone, you can run a one-off test. The phone's location should move to central London. Press `Ctrl+C` to end the test.
 
@@ -154,12 +166,14 @@ On first launch, allow **Local Network** access (needed to reach the server) and
 
 ## Running LocSimServer as a background service
 
-Once everything works, you can keep the server running permanently. The service starts when you log in and restarts automatically if it stops.
+`setup.sh` installs the service for you. The service starts when you log in and restarts automatically if it stops. To manage it yourself:
 
 ```bash
-./LocSimServer/install_service.sh              # install or reinstall
+./LocSimServer/install_service.sh              # install or reinstall (run again after pulling changes)
 ./LocSimServer/install_service.sh --uninstall  # remove
 ```
+
+Stop any copy of the server you started in Terminal first (`Ctrl+C`); only one can use port 8765.
 
 The installer uses `LocSimServer/.venv` automatically when it exists. Server output is written to `~/Library/Logs/LocSimServer.log`:
 
@@ -168,6 +182,25 @@ tail -f ~/Library/Logs/LocSimServer.log
 ```
 
 The service runs as a LaunchAgent named `com.atharvtiwari.locsim`. A user must be logged in on the Mac, and the Mac must be awake.
+
+## Using it away from home (Personal Hotspot)
+
+The Mac must be with the phone (see [Networking](#networking)). To run LocSim from a bag with the MacBook's lid closed:
+
+1. **Keep the server running:** install the background service (`./setup.sh` does this).
+2. **Stop the Mac sleeping when the lid is closed:**
+
+   ```bash
+   sudo pmset -a disablesleep 1   # turn sleep off
+   sudo pmset -a disablesleep 0   # turn normal sleep back on
+   ```
+
+   The free Amphetamine app (Mac App Store) offers the same thing as a switch ("closed-display mode"). An awake Mac with its lid closed uses battery and can get warm, so avoid sealing it in a tight bag, and turn sleep back on afterwards.
+3. **Keep the hotspot connection:** on the iPhone, turn on **Settings > Personal Hotspot > Allow Others to Join** and **Maximise Compatibility**. On the Mac, join the hotspot once, then in **System Settings > Wi-Fi** click the **…** next to it and turn on **Auto-Join**.
+4. **In the app**, use `<Mac name>.local:8765`, which keeps working when the hotspot gives the Mac a new IP address.
+5. For the most reliable connection, also connect the iPhone to the Mac with a cable. The developer connection then survives Wi-Fi blips.
+
+If the connection to the phone drops, iOS returns to the real GPS within seconds. LocSimServer keeps the chosen place and sets it again automatically (retried every 10 seconds) when the phone is back.
 
 ## Using the app
 
@@ -187,7 +220,7 @@ The status at the top of the sheet means:
 | Status | Meaning |
 | --- | --- |
 | Simulating | The phone has confirmed the simulated location |
-| Connecting to iPhone | The server has the request but cannot currently reach the phone; it retries every 15 seconds |
+| Real location – waiting for iPhone | The server has a place to set but cannot currently reach the phone, so the phone is on its real GPS; the server retries every 10 seconds and sets the place as soon as the phone is reachable |
 | Real location | Simulation is off |
 | Mac not reachable | The app cannot contact LocSimServer at the configured address |
 
@@ -212,7 +245,9 @@ Supported set-ups:
 - Mac connected to the iPhone's Personal Hotspot. Using the Tailscale address in the app is recommended, because the hotspot address can change.
 - Phone connected to the Mac by cable. The phone can then be on any network if the app reaches the server over Tailscale.
 
-Not supported: the phone on one network (for example mobile data) while the Mac is elsewhere, with no cable or shared local network between them. The app will reach the server over Tailscale, but the server cannot reach the phone, and the status will remain on "Connecting to iPhone".
+Not supported: the phone on one network (for example mobile data) while the Mac is elsewhere, with no cable or shared local network between them. The app will reach the server over Tailscale, but the server cannot reach the phone, and the status will remain on "Real location – waiting for iPhone". This was tested: iOS refuses its developer services (ports 62078 and RemotePairing) over Tailscale, and drops a simulated location within seconds of losing the connection, so it cannot be set at home and carried away either.
+
+Docker is not supported on macOS: containers run inside a Linux virtual machine that has no access to macOS's device connection (`--native`), to USB devices, or to Bonjour on the local network, so a containerised server cannot see the iPhone.
 
 ## Configuration
 
@@ -245,9 +280,9 @@ All responses are JSON.
 
 | Method | Path | Body | Response |
 | --- | --- | --- | --- |
-| `GET` | `/status` (or `/`) | None | `{"active": bool, "message": str, "name": str, "lat": float, "lon": float}`; `name`, `lat` and `lon` are present only while a location is set |
-| `POST` | `/set` | `{"lat": float, "lon": float, "name": str}` | `200` with `{"message": ...}` once the phone confirms the location; `500` with an explanation if the phone cannot be reached (the server keeps retrying in the background) |
-| `POST` | `/clear` | `{}` | `200` with `{"message": ...}`; the phone returns to its real GPS |
+| `GET` | `/status` (or `/`) | None | `{"active": bool, "linked": bool, "message": str, "name": str, "lat": float, "lon": float, "pending": str}`. `active` is true while the phone has confirmed the location; `linked` is whether the server can currently reach the phone; `name`, `lat` and `lon` are present while a place is set; `pending` names a place waiting for the phone to be reachable |
+| `POST` | `/set` | `{"lat": float, "lon": float, "name": str}` | `200` with `{"message": ...}` once the phone confirms the location; `503` with an explanation if the phone cannot be reached (the place is kept and set automatically when the phone is back) |
+| `POST` | `/clear` | `{}` | `200` with `{"message": ...}`; the phone returns to its real GPS. `503` if the server could not confirm it with the phone (it keeps trying) |
 
 Example:
 
@@ -266,9 +301,11 @@ curl -X POST http://localhost:8765/clear -d '{}'
 | The server prints `pymobiledevice3 not found` | The server was started with the system `python3`. Start it with `LocSimServer/.venv/bin/python` |
 | The app shows "Mac not reachable" or "The request timed out" | Check that the server is running, that the address in Settings matches one printed by the server, and that the two devices can reach each other (or that Tailscale is on for both). If the Mac is on the iPhone's hotspot, its hotspot address may have changed |
 | The app shows "App Transport Security policy requires the use of a secure connection" | `LocSim-Info.plist` must contain `NSAllowsArbitraryLoads` and must not contain `NSAllowsLocalNetworking`. Rebuild the app after changing it |
-| The status stays on "Connecting to iPhone", or the server logs "Device not found" | The Mac cannot see the phone. Connect it by cable, or put the Mac on the same Wi-Fi network or on the iPhone's hotspot. Make sure the phone is unlocked and Developer Mode is on |
+| The status stays on "Real location – waiting for iPhone", or the server logs "Device not found" | The Mac cannot see the phone. Connect it by cable, or put the Mac on the same Wi-Fi network or on the iPhone's hotspot. Make sure the phone is unlocked and Developer Mode is on |
 | `pymobiledevice3 usbmux list` returns `[]`, or a command reports "Device is not connected" | The direct USB route is unavailable on recent macOS and iOS versions. LocSimServer uses `--native` by default, which works through macOS's own device connection |
 | The location changes briefly, then reverts | Another tool, such as Xcode's Debug > Simulate Location, is also controlling the location. Quit Xcode or choose "Don't Simulate Location" while using LocSim |
+| `install_service.sh` reports `Bootstrap failed: 5: Input/output error` | The previous copy of the service was still shutting down. Run the script again; current versions wait for the old copy to stop |
+| The service log shows `Operation not permitted` | macOS is blocking the background service from reading the project folder (for example in Documents). Add `LocSimServer/.venv/bin/python` under **System Settings > Privacy & Security > Full Disk Access**, then reinstall the service |
 | The app no longer opens after a week | Apps signed with a free Apple ID expire after seven days. Run the project from Xcode again |
 | The location dot does not appear on the map | Allow location access for LocSim in **Settings > Privacy & Security > Location Services** |
 | The Home Screen still shows an old icon | Delete the app from the phone and run it from Xcode again; iOS caches app icons |
