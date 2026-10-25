@@ -39,8 +39,7 @@ PORT = int(os.environ.get("PORT", "8765"))
 # On macOS, "--native" reaches the iPhone through Apple's own connection (the one Xcode uses),
 # which works over cable and Wi-Fi without root. Override with PMD_ARGS if needed.
 PMD_ARGS = os.environ.get("PMD_ARGS", "--native" if sys.platform == "darwin" else "").split()
-RETRY_SECONDS = 15  # first retry after the iPhone drops off; doubles each time...
-MAX_RETRY_SECONDS = 120  # ...up to this, so an iPhone away from home doesn't keep the Mac busy
+RETRY_SECONDS = 10  # how often to try to reach the iPhone again after it drops off
 CONFIRM_SECONDS = 20  # how long to wait for the iPhone to confirm a new location
 # Remembers the location the iPhone is showing, so a restart of this server still knows it.
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".locsim_state.json")
@@ -100,7 +99,6 @@ class Simulator:
         self.connected = False         # True while pymobiledevice3 is linked to the iPhone
         self.last_error = None
         self.next_retry = time.time() + RETRY_SECONDS
-        self.retry_delay = RETRY_SECONDS
         threading.Thread(target=self._watch, daemon=True).start()
 
     # -- public ---------------------------------------------------------------
@@ -151,7 +149,6 @@ class Simulator:
         _save_state(value)
 
     def _reset_retry(self):
-        self.retry_delay = RETRY_SECONDS
         self.next_retry = time.time() + RETRY_SECONDS
 
     def _clear_on_phone(self):
@@ -247,8 +244,8 @@ class Simulator:
     def _watch(self):
         """Notices when the iPhone drops off, and finishes pending changes once it's back.
 
-        Losing the iPhone doesn't turn simulation off: it keeps the last location. Retries back
-        off from 15 s to 2 min so a phone that's away from home doesn't keep the Mac busy.
+        Losing the iPhone doesn't turn simulation off: the place you picked is kept and set again
+        as soon as the iPhone is reachable – it's retried every RETRY_SECONDS.
         """
         while True:
             time.sleep(1)
@@ -263,8 +260,7 @@ class Simulator:
                             f"{self.target[2]} will be set again when it's back")
                 if time.time() < self.next_retry:
                     continue
-                self.next_retry = time.time() + self.retry_delay
-                self.retry_delay = min(self.retry_delay * 2, MAX_RETRY_SECONDS)
+                self.next_retry = time.time() + RETRY_SECONDS
                 if self.target is None and self.applied is not None:
                     ok, _ = self._clear_on_phone()
                     if ok:
@@ -275,7 +271,7 @@ class Simulator:
                     if ok and was_pending:
                         log(f"ON   {self.target[2]}  (iPhone is back)")
                     elif ok:
-                        log(f"Reconnected to the iPhone – still at {self.target[2]}")
+                        log(f"Reconnected to the iPhone – set to {self.target[2]} again")
 
 
 def _load_state():
