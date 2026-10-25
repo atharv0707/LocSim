@@ -25,6 +25,7 @@ Settings (environment variables):
 
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -355,9 +356,22 @@ class Handler(BaseHTTPRequestHandler):
         pass  # keep the output readable
 
 
-def addresses():
+def _bonjour_name():
+    """The Mac's current .local name (System Settings › General › Sharing › Local hostname)."""
+    if sys.platform == "darwin":
+        try:
+            name = subprocess.run(["scutil", "--get", "LocalHostName"], capture_output=True,
+                                  text=True, timeout=5).stdout.strip()
+            if name:
+                return name + ".local"
+        except (OSError, subprocess.SubprocessError):
+            pass
     host = socket.gethostname()
-    found = [host if host.endswith(".local") else host + ".local"]
+    return host if host.endswith(".local") else host + ".local"
+
+
+def addresses():
+    found = [_bonjour_name()]
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("10.255.255.255", 1))  # no packet is sent; just picks the LAN interface
@@ -366,9 +380,11 @@ def addresses():
         pass
     tailscale = shutil.which("tailscale") or "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
     try:
-        ip = subprocess.run([tailscale, "ip", "-4"], capture_output=True, text=True, timeout=5).stdout.strip()
+        out = subprocess.run([tailscale, "ip", "-4"], capture_output=True, text=True, timeout=5).stdout
+        # Only trust a real address: run as a background service, the Tailscale app prints an error here.
+        ip = next((l.strip() for l in out.splitlines() if re.fullmatch(r"100\.\d+\.\d+\.\d+", l.strip())), None)
         if ip:
-            found.append(ip.splitlines()[0] + "  (Tailscale)")
+            found.append(ip + "  (Tailscale)")
     except (OSError, subprocess.SubprocessError):
         pass
     return found
