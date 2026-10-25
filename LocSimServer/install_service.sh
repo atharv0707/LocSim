@@ -18,6 +18,13 @@ if [[ -x "$DIR/.venv/bin/python" ]]; then DEFAULT_PYTHON="$DIR/.venv/bin/python"
 PYTHON="${PYTHON:-$DEFAULT_PYTHON}"
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+# bootout returns before the old server has finished shutting down (it clears the location on
+# the way out, which can take ~20 s). Bootstrapping before it's gone fails with
+# "Bootstrap failed: 5: Input/output error", so wait for it.
+for _ in $(seq 1 40); do
+    launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || break
+    sleep 1
+done
 
 if [[ "${1:-}" == "--uninstall" ]]; then
     rm -f "$PLIST"
